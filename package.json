@@ -1,0 +1,12 @@
+{
+  "name": "p2p-webrtc-demo",
+  "version": "1.0.0",
+  "description": "跨局域网 P2P 文件传输最小原型 - WebRTC DataChannel + 轻量信令服务器",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

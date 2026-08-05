@@ -1,0 +1,14 @@
+# Render Blueprint —— P2P 信令服务器
+# 文档: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: p2p-signal
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production

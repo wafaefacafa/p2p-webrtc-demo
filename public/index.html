@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P2P 传输 · WebRTC DataChannel</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --text: #1d1d1f;
+    --muted: #86868b;
+    --line: rgba(0,0,0,0.08);
+    --accent: #0071e3;
+    --accent-press: #0058b9;
+    --green: #34c759;
+    --amber: #ff9f0a;
+    --red: #ff3b30;
+    --radius: 14px;
+    --radius-sm: 9px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04);
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 32px 20px 64px; }
+
+  /* header */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 28px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); transition: background .2s; }
+  .brand .dot.on { background: var(--green); box-shadow: 0 0 0 4px rgba(52,199,89,.18); }
+  .brand h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .id-chip {
+    font-family: var(--mono); font-size: 13px; padding: 7px 12px;
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    display: flex; align-items: center; gap: 8px; cursor: pointer; transition: border-color .15s;
+  }
+  .id-chip:hover { border-color: var(--accent); }
+  .id-chip .lbl { color: var(--muted); font-family: inherit; }
+  .id-chip code { color: var(--accent); font-weight: 600; }
+
+  .grid { display: grid; grid-template-columns: 340px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; }
+  .card + .card { margin-top: 16px; }
+  .card h2 { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
+  .card h2 .count { font-size: 12px; color: var(--muted); font-weight: 500; }
+
+  /* status badge */
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; }
+  .badge .pip { width: 7px; height: 7px; border-radius: 50%; }
+  .badge.idle { background: rgba(134,134,139,.12); color: var(--muted); }
+  .badge.idle .pip { background: var(--muted); }
+  .badge.connecting { background: rgba(255,159,10,.14); color: var(--amber); }
+  .badge.connecting .pip { background: var(--amber); animation: pulse 1s infinite; }
+  .badge.online { background: rgba(52,199,89,.16); color: var(--green); }
+  .badge.online .pip { background: var(--green); }
+  .badge.offline { background: rgba(255,59,48,.14); color: var(--red); }
+  .badge.offline .pip { background: var(--red); }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* peer list */
+  .peer-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }
+  .peer-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+    cursor: pointer; transition: all .15s; background: var(--card);
+  }
+  .peer-item:hover { border-color: var(--accent); background: rgba(0,113,227,.04); }
+  .peer-item .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .peer-item .name { font-size: 13px; font-weight: 600; }
+  .peer-item .pid { font-family: var(--mono); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .peer-item .call { color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 28px 0; }
+
+  /* buttons / inputs */
+  .row { display: flex; gap: 8px; margin-bottom: 12px; }
+  input[type=text], input[type=file] {
+    flex: 1; font-size: 14px; padding: 10px 12px; border: 1px solid var(--line);
+    border-radius: var(--radius-sm); background: var(--card); color: var(--text); font-family: inherit;
+    transition: border-color .15s, box-shadow .15s; min-width: 0;
+  }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,.16); }
+  .btn {
+    font-size: 14px; font-weight: 600; padding: 10px 18px; border: none; border-radius: var(--radius-sm);
+    cursor: pointer; transition: background .15s, transform .05s; font-family: inherit; white-space: nowrap;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: var(--accent-press); }
+  .btn.ghost { background: rgba(0,0,0,.05); color: var(--text); }
+  .btn.ghost:hover:not(:disabled) { background: rgba(0,0,0,.09); }
+  .btn.danger { background: rgba(255,59,48,.12); color: var(--red); }
+  .btn.danger:hover:not(:disabled) { background: rgba(255,59,48,.2); }
+
+  /* dc state */
+  .dc-state { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding: 12px 14px; background: rgba(0,0,0,.02); border-radius: var(--radius-sm); }
+
+  /* messages */
+  .msgs { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; padding: 4px 2px; margin-bottom: 12px; }
+  .msg { font-size: 14px; padding: 9px 13px; border-radius: 13px; max-width: 80%; word-break: break-word; }
+  .msg.out { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.in { align-self: flex-start; background: rgba(0,0,0,.06); color: var(--text); border-bottom-left-radius: 4px; }
+  .msg.sys { align-self: center; background: transparent; color: var(--muted); font-size: 12px; padding: 2px; }
+
+  /* transfer */
+  .drop {
+    border: 1.5px dashed var(--line); border-radius: var(--radius-sm); padding: 22px;
+    text-align: center; color: var(--muted); font-size: 13px; cursor: pointer; transition: all .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: rgba(0,113,227,.04); color: var(--accent); }
+  .drop strong { color: var(--accent); }
+  .transfer { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+  .tx-item { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; }
+  .tx-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .tx-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tx-meta { font-size: 11px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+  .tx-dir { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+  .tx-dir.up { background: rgba(0,113,227,.12); color: var(--accent); }
+  .tx-dir.down { background: rgba(52,199,89,.14); color: var(--green); }
+  .bar { height: 6px; background: rgba(0,0,0,.06); border-radius: 999px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 999px; width: 0; transition: width .15s; }
+  .bar.down > i { background: var(--green); }
+  .tx-item.done .bar > i { background: var(--green); }
+
+  /* log */
+  .log { font-family: var(--mono); font-size: 12px; max-height: 180px; overflow-y: auto; background: rgba(0,0,0,.02); border-radius: var(--radius-sm); padding: 12px; line-height: 1.7; }
+  .log .line { color: var(--muted); }
+  .log .line .t { color: var(--muted); opacity: .6; }
+  .log .line b { color: var(--accent); font-weight: 600; }
+  .log .line.err b { color: var(--red); }
+  .log .line.ok b { color: var(--green); }
+
+  .hint { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+  .conn-type { font-size: 13px; font-family: var(--mono); font-weight: 600; color: var(--muted); padding: 3px 10px; border-radius: 999px; background: rgba(0,0,0,.05); }
+  .conn-type.host { color: var(--accent); background: rgba(0,113,227,.1); }
+  .conn-type.srflx { color: var(--green); background: rgba(52,199,89,.12); }
+  .conn-type.relay { color: var(--amber); background: rgba(255,159,10,.14); }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 999px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="dot" id="sigDot"></span>
+      <h1>P2P 传输</h1>
+      <span class="badge idle" id="sigBadge"><span class="pip"></span>信令连接中</span>
+    </div>
+    <div class="id-chip" id="idChip" title="点击复制">
+      <span class="lbl">我的 ID</span>
+      <code id="myId">……</code>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- 左栏：连接控制 -->
+    <div>
+      <div class="card">
+        <h2>连接对端</h2>
+        <div class="row">
+          <input type="text" id="remoteId" placeholder="输入对端 ID" autocomplete="off">
+        </div>
+        <div class="row">
+          <button class="btn primary" id="callBtn" style="flex:1">呼叫</button>
+          <button class="btn danger" id="hangBtn" disabled>挂断</button>
+        </div>
+        <div class="dc-state">
+          <span style="font-size:13px;color:var(--muted)">数据通道</span>
+          <span class="badge idle" id="dcBadge"><span class="pip"></span>未连接</span>
+        </div>
+        <div class="dc-state">
+          <span style="font-size:13px;color:var(--muted)">连接类型</span>
+          <span class="conn-type" id="connType">—</span>
+        </div>
+        <p class="hint">host=同网直连 · srflx=STUN打洞(跨网) · relay=TURN中继。打洞失败需部署自建 coturn 做兜底。</p>
+      </div>
+
+      <div class="card">
+        <h2>在线节点 <span class="count" id="peerCount">0 个</span></h2>
+        <div class="peer-list" id="peerList">
+          <div class="empty">暂无其他节点</div>
+        </div>
+        <p class="hint">在两个浏览器标签页打开本页即可互连。跨设备测试需用本机局域网 IP 访问。</p>
+      </div>
+    </div>
+
+    <!-- 右栏：数据传输 -->
+    <div>
+      <div class="card">
+        <h2>即时消息</h2>
+        <div class="msgs" id="msgs">
+          <div class="msg sys">连接数据通道后即可收发消息</div>
+        </div>
+        <div class="row" style="margin-bottom:0">
+          <input type="text" id="msgInput" placeholder="输入消息，回车发送" autocomplete="off">
+          <button class="btn primary" id="sendBtn" disabled>发送</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>文件传输</h2>
+        <label class="drop" id="drop">
+          <input type="file" id="fileInput" hidden>
+          <strong>点击选择</strong> 或拖拽文件到此处发送
+        </label>
+        <div class="transfer" id="transfers"></div>
+        <p class="hint">文件按 64KB 分片经 DataChannel 直传，自带进度与校验。接收完成自动触发下载。</p>
+      </div>
+
+      <div class="card">
+        <h2>活动日志</h2>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- DOM ----------
+  const $ = (id) => document.getElementById(id);
+  const sigDot = $('sigDot'), sigBadge = $('sigBadge'), myIdEl = $('myId'), idChip = $('idChip');
+  const remoteId = $('remoteId'), callBtn = $('callBtn'), hangBtn = $('hangBtn');
+  const dcBadge = $('dcBadge'), connType = $('connType'), peerListEl = $('peerList'), peerCount = $('peerCount');
+  const msgsEl = $('msgs'), msgInput = $('msgInput'), sendBtn = $('sendBtn');
+  const dropEl = $('drop'), fileInput = $('fileInput'), transfersEl = $('transfers');
+  const logEl = $('log');
+
+  // ---------- 状态 ----------
+  // ICE 配置：多个公共 STUN 提升跨网打洞成功率；
+  // TURN 支持 URL 参数注入（部署自建 coturn 后即兜底对称型 NAT）：
+  //   ?turn=turn:your.host:3478&user=xxx&cred=yyy
+  function buildIceServers() {
+    const stunList = [
+      'stun:stun.l.google.com:19302',
+      'stun:stun1.l.google.com:19302',
+      'stun:stun2.l.google.com:19302',
+      'stun:stun.cloudflare.com:3478',
+      'stun:stun.miwifi.com:3478'
+    ];
+    const iceServers = stunList.map(urls => ({ urls }));
+    const params = new URLSearchParams(location.search);
+    const turnUrl = params.get('turn');
+    if (turnUrl) {
+      const u = params.get('user') || '';
+      const c = params.get('cred') || '';
+      iceServers.push({ urls: turnUrl, username: u, credential: c });
+      log(b('TURN') + ' 已注入 ' + turnUrl);
+    }
+    return { iceServers };
+  }
+  const ICE_SERVERS = buildIceServers();
+  const CHUNK = 64 * 1024; // 64KB
+  const myId = 'p-' + Math.random().toString(36).slice(2, 8);
+  let ws = null;
+  let pc = null;        // RTCPeerConnection
+  let dc = null;        // 主 DataChannel（由呼叫方创建）
+  let remotePeer = null;
+  let peers = [];
+
+  // 接收中的文件: id -> {name,size,total,received,chunks,dir,el,bar}
+  const incoming = new Map();
+
+  myIdEl.textContent = myId;
+
+  // ---------- 工具 ----------
+  function log(msg, kind) {
+    const t = new Date().toLocaleTimeString('zh-CN');
+    const line = document.createElement('div');
+    line.className = 'line ' + (kind || '');
+    line.innerHTML = '<span class="t">[' + t + ']</span> ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function b(msg) { return '<b>' + msg + '</b>'; }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+  }
+
+  function setSig(state) {
+    sigDot.classList.toggle('on', state === 'on');
+    sigBadge.className = 'badge ' + (state === 'on' ? 'online' : 'connecting');
+    sigBadge.innerHTML = '<span class="pip"></span>' + (state === 'on' ? '信令已连接' : '信令连接中');
+  }
+  function setDc(state) {
+    const map = { idle: ['idle', '未连接'], conn: ['connecting', '连接中…'], on: ['online', '已连接'], off: ['offline', '已断开'] };
+    const [cls, txt] = map[state] || map.idle;
+    dcBadge.className = 'badge ' + cls;
+    dcBadge.innerHTML = '<span class="pip"></span>' + txt;
+    const open = state === 'on';
+    sendBtn.disabled = !open;
+    callBtn.disabled = open;
+    hangBtn.disabled = !open;
+    dropEl.style.pointerEvents = open ? 'auto' : 'none';
+    dropEl.style.opacity = open ? '1' : '.5';
+    if (state === 'idle' || state === 'off') {
+      connType.className = 'conn-type';
+      connType.textContent = '—';
+      if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+    }
+  }
+
+  function addMsg(text, dir) {
+    const m = document.createElement('div');
+    m.className = 'msg ' + dir;
+    m.textContent = text;
+    msgsEl.appendChild(m);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+  }
+
+  // ---------- 信令 ----------
+  function connectSig() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(proto + '://' + location.host);
+    ws.onopen = () => {
+      setSig('on');
+      ws.send(JSON.stringify({ type: 'register', peerId: myId, name: myId }));
+      log(b('信令') + ' 服务器已连接');
+    };
+    ws.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      handleSig(m);
+    };
+    ws.onclose = () => { setSig('conn'); log(b('信令') + ' 断开，3s 后重连', 'err'); setTimeout(connectSig, 3000); };
+    ws.onerror = () => {};
+  }
+
+  function sendSig(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  function handleSig(m) {
+    switch (m.type) {
+      case 'registered':
+        log(b('注册') + ' 成功，ID ' + myId);
+        break;
+      case 'peers':
+        peers = m.peers.filter(p => p.id !== myId);
+        renderPeers();
+        break;
+      case 'offer':
+        onOffer(m);
+        break;
+      case 'answer':
+        onAnswer(m);
+        break;
+      case 'ice':
+        onRemoteIce(m);
+        break;
+      case 'error':
+        log(b('错误') + ' ' + m.message, 'err');
+        setDc('idle');
+        break;
+    }
+  }
+
+  function renderPeers() {
+    peerCount.textContent = peers.length + ' 个';
+    if (!peers.length) { peerListEl.innerHTML = '<div class="empty">暂无其他节点</div>'; return; }
+    peerListEl.innerHTML = '';
+    peers.forEach(p => {
+      const el = document.createElement('div');
+      el.className = 'peer-item';
+      el.innerHTML =
+        '<div class="who"><span class="name">' + p.name + '</span>' +
+        '<span class="pid">' + p.id + '</span></div>' +
+        '<span class="call">呼叫 →</span>';
+      el.onclick = () => { remoteId.value = p.id; call(); };
+      peerListEl.appendChild(el);
+    });
+  }
+
+  // ---------- WebRTC ----------
+  let statsTimer = null;
+  function newPc() {
+    pc = new RTCPeerConnection(ICE_SERVERS);
+    pc.oniceconnectionstatechange = () => {
+      log(b('ICE') + ' ' + pc.iceConnectionState);
+      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') setDc('off');
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') startStatsProbe();
+    };
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        // 解析 candidate 类型，让用户看到打洞过程
+        const tp = (e.candidate.candidate.match(/typ (\w+)/) || [])[1] || '?';
+        log(b('候选') + ' ' + tp + ' · ' + e.candidate.candidate.split(' ').slice(4, 6).join(':'));
+        sendSig({ type: 'ice', target: remotePeer, candidate: e.candidate });
+      } else {
+        log(b('候选') + ' 收集完毕');
+      }
+    };
+    pc.ondatachannel = (e) => { setupDc(e.channel); };
+  }
+
+  // 用 getStats 探测实际选中的连接类型（host/srflx/relay）
+  function startStatsProbe() {
+    if (statsTimer) clearInterval(statsTimer);
+    statsTimer = setInterval(async () => {
+      if (!pc) { clearInterval(statsTimer); return; }
+      const stats = await pc.getStats();
+      let found = null;
+      stats.forEach(r => {
+        if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) {
+          const local = stats.get(r.localCandidateId);
+          if (local && local.candidateType) found = local.candidateType;
+        }
+      });
+      if (found) {
+        const label = { host: 'host 直连', srflx: 'srflx 打洞', prflx: 'prflx', relay: 'relay 中继' }[found] || found;
+        connType.className = 'conn-type ' + found;
+        connType.textContent = label;
+      }
+    }, 1000);
+  }
+
+  // 呼叫方
+  function call() {
+    const target = remoteId.value.trim();
+    if (!target) { log(b('提示') + ' 请输入对端 ID', 'err'); return; }
+    if (!ws || ws.readyState !== 1) { log(b('提示') + ' 信令未连接', 'err'); return; }
+    if (dc && dc.readyState === 'open') return;
+    remotePeer = target;
+    setDc('conn');
+    log(b('呼叫') + ' ' + target + ' …');
+    newPc();
+    dc = pc.createDataChannel('file', { ordered: true });
+    setupDc(dc);
+    pc.createOffer().then(o => pc.setLocalDescription(o)).then(() => {
+      sendSig({ type: 'offer', target: remotePeer, sdp: pc.localDescription });
+    }).catch(err => log(b('错误') + ' ' + err.message, 'err'));
+  }
+
+  // 被叫方收到 offer
+  function onOffer(m) {
+    remotePeer = m.from;
+    setDc('conn');
+    log(b('来电') + ' 来自 ' + remotePeer);
+    if (pc) { try { pc.close(); } catch (e) {} }
+    newPc();
+    pc.setRemoteDescription(new RTCSessionDescription(m.sdp)).then(() => pc.createAnswer())
+      .then(a => pc.setLocalDescription(a))
+      .then(() => sendSig({ type: 'answer', target: remotePeer, sdp: pc.localDescription }))
+      .catch(err => log(b('错误') + ' ' + err.message, 'err'));
+  }
+
+  function onAnswer(m) {
+    if (!pc) return;
+    pc.setRemoteDescription(new RTCSessionDescription(m.sdp))
+      .catch(err => log(b('错误') + ' ' + err.message, 'err'));
+  }
+
+  function onRemoteIce(m) {
+    if (!pc) return;
+    pc.addIceCandidate(new RTCIceCandidate(m.candidate)).catch(() => {});
+  }
+
+  function setupDc(channel) {
+    dc = channel;
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 256 * 1024;
+    dc.onopen = () => {
+      setDc('on');
+      log(b('通道') + ' 已建立', 'ok');
+      addMsg('数据通道已连接', 'sys');
+    };
+    dc.onclose = () => { setDc('off'); log(b('通道') + ' 已关闭'); addMsg('数据通道已断开', 'sys'); };
+    dc.onerror = (e) => log(b('通道') + ' 错误', 'err');
+    dc.onmessage = (e) => onDcMessage(e.data);
+  }
+
+  function hangup() {
+    if (dc) { try { dc.close(); } catch (e) {} dc = null; }
+    if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+    setDc('idle');
+    log(b('挂断'));
+  }
+
+  // ---------- DataChannel 协议 ----------
+  // 前缀字节：1=text, 2=file-meta, 3=file-chunk(4字节序号+数据), 4=file-end
+  function onDcMessage(buf) {
+    const data = new Uint8Array(buf);
+    const kind = data[0];
+    if (kind === 1) {
+      addMsg(new TextDecoder().decode(data.subarray(1)), 'in');
+    } else if (kind === 2) {
+      const meta = JSON.parse(new TextDecoder().decode(data.subarray(1)));
+      startIncoming(meta);
+    } else if (kind === 3) {
+      const idx = new DataView(buf, 1, 4).getUint32(0);
+      const chunk = data.subarray(5);
+      recvChunk(idx, chunk);
+    } else if (kind === 4) {
+      const info = JSON.parse(new TextDecoder().decode(data.subarray(1)));
+      finishIncoming(info.id);
+    }
+  }
+
+  function sendText() {
+    const t = msgInput.value.trim();
+    if (!t || !dc || dc.readyState !== 'open') return;
+    const enc = new TextEncoder().encode(t);
+    const buf = new Uint8Array(enc.length + 1);
+    buf[0] = 1; buf.set(enc, 1);
+    dc.send(buf);
+    addMsg(t, 'out');
+    msgInput.value = '';
+  }
+
+  // 接收
+  function startIncoming(meta) {
+    const id = meta.id;
+    const item = addTransferItem(meta.name, meta.size, 'down');
+    incoming.set(id, { meta, received: 0, chunks: [], item, bar: item.querySelector('.bar > i'), total: meta.total });
+    log(b('接收') + ' ' + meta.name + ' (' + fmtSize(meta.size) + ')');
+  }
+  function recvChunk(idx, chunk) {
+    // 找到对应 incoming（按接收顺序，简化：单文件串行）
+    let entry = null;
+    for (const v of incoming.values()) { entry = v; break; }
+    if (!entry) return;
+    entry.chunks[idx] = chunk;
+    entry.received++;
+    const pct = (entry.received / entry.meta.total) * 100;
+    entry.bar.style.width = pct + '%';
+    entry.item.querySelector('.tx-meta').textContent =
+      fmtSize(entry.received * CHUNK) + ' / ' + fmtSize(entry.meta.size) + ' · ' + pct.toFixed(0) + '%';
+  }
+  function finishIncoming(id) {
+    const entry = incoming.get(id);
+    if (!entry) return;
+    const blob = new Blob(entry.chunks, { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = entry.meta.name; a.click();
+    URL.revokeObjectURL(url);
+    entry.item.classList.add('done');
+    entry.item.querySelector('.tx-meta').textContent = '已完成 · ' + fmtSize(entry.meta.size);
+    log(b('完成') + ' ' + entry.meta.name, 'ok');
+    incoming.delete(id);
+  }
+
+  // 发送
+  function addTransferItem(name, size, dir) {
+    const el = document.createElement('div');
+    el.className = 'tx-item';
+    el.innerHTML =
+      '<div class="tx-head">' +
+        '<span class="tx-name">' + name + '</span>' +
+        '<span class="tx-dir ' + dir + '">' + (dir === 'up' ? '发送' : '接收') + '</span>' +
+      '</div>' +
+      '<div class="bar ' + dir + '"><i></i></div>' +
+      '<div class="tx-meta">' + (dir === 'up' ? '准备中' : '0 / ' + fmtSize(size)) + '</div>';
+    transfersEl.appendChild(el);
+    return el;
+  }
+
+  async function sendFile(file) {
+    if (!dc || dc.readyState !== 'open') { log(b('提示') + ' 数据通道未连接', 'err'); return; }
+    const id = 'f-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    const total = Math.ceil(file.size / CHUNK);
+    const item = addTransferItem(file.name, file.size, 'up');
+    const bar = item.querySelector('.bar > i');
+
+    // 1. 发元数据
+    const meta = JSON.stringify({ id, name: file.name, size: file.size, total });
+    const metaBuf = new Uint8Array(new TextEncoder().encode(meta).length + 1);
+    metaBuf[0] = 2; metaBuf.set(new TextEncoder().encode(meta), 1);
+    dc.send(metaBuf);
+    log(b('发送') + ' ' + file.name + ' (' + fmtSize(file.size) + ', ' + total + ' 片)');
+
+    // 2. 分片发送 + 流控
+    const ab = await file.arrayBuffer();
+    const u8 = new Uint8Array(ab);
+    let sent = 0;
+    for (let i = 0; i < total; i++) {
+      // 流控：缓冲超阈值则等待
+      while (dc.bufferedAmount > 4 * 1024 * 1024) {
+        await new Promise(res => {
+          const h = () => { dc.removeEventListener('bufferedamountlow', h); res(); };
+          dc.addEventListener('bufferedamountlow', h);
+        });
+      }
+      const start = i * CHUNK;
+      const slice = u8.subarray(start, Math.min(start + CHUNK, file.size));
+      const buf = new Uint8Array(slice.length + 5);
+      buf[0] = 3;
+      new DataView(buf.buffer, 1, 4).setUint32(0, i);
+      buf.set(slice, 5);
+      dc.send(buf);
+      sent++;
+      const pct = (sent / total) * 100;
+      bar.style.width = pct + '%';
+      item.querySelector('.tx-meta').textContent =
+        fmtSize(sent * CHUNK) + ' / ' + fmtSize(file.size) + ' · ' + pct.toFixed(0) + '%';
+    }
+
+    // 3. 发结束
+    const end = JSON.stringify({ id });
+    const endBuf = new Uint8Array(new TextEncoder().encode(end).length + 1);
+    endBuf[0] = 4; endBuf.set(new TextEncoder().encode(end), 1);
+    dc.send(endBuf);
+    item.classList.add('done');
+    item.querySelector('.tx-meta').textContent = '已发送 · ' + fmtSize(file.size);
+    log(b('完成') + ' ' + file.name + ' 发送完毕', 'ok');
+  }
+
+  // ---------- 事件 ----------
+  idChip.onclick = () => {
+    navigator.clipboard.writeText(myId).then(() => {
+      const old = myIdEl.textContent; myIdEl.textContent = '已复制!';
+      setTimeout(() => myIdEl.textContent = old, 1200);
+    });
+  };
+  callBtn.onclick = call;
+  hangBtn.onclick = hangup;
+  sendBtn.onclick = sendText;
+  msgInput.onkeydown = (e) => { if (e.key === 'Enter') sendText(); };
+  fileInput.onchange = () => { if (fileInput.files[0]) sendFile(fileInput.files[0]); fileInput.value = ''; };
+  dropEl.onclick = () => fileInput.click();
+  ['dragover', 'dragenter'].forEach(ev => dropEl.addEventListener(ev, (e) => { e.preventDefault(); dropEl.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => dropEl.addEventListener(ev, (e) => { e.preventDefault(); dropEl.classList.remove('over'); }));
+  dropEl.addEventListener('drop', (e) => {
+    const f = e.dataTransfer.files[0];
+    if (f) sendFile(f);
+  });
+
+  // ---------- 启动 ----------
+  setSig('conn');
+  setDc('idle');
+  connectSig();
+})();
+</script>
+</body>
+</html>

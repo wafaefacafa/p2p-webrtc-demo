@@ -1,0 +1,16 @@
+# coturn TURN/STUN 服务器 —— 跨网穿透兜底方案
+#
+# 部署：复制本目录到一台有公网 IP 的 Linux 服务器，执行 docker compose up -d
+# 防火墙放行：3478/tcp+udp、5349/tcp、50000-60000/udp
+# 用法：浏览器访问 http://<信令服务器>/?turn=turn:<公网IP>:3478&user=p2p&cred=p2psecret
+
+version: "3.8"
+services:
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/turnserver.conf:ro
+      - ./data:/var/lib/coturn
+    command: ["-c", "/etc/turnserver.conf"]
