@@ -43,21 +43,6 @@ wss.on('connection', (ws) => {
   let myId = null;
 
   ws.on('message', (raw, isBinary) => {
-    // 二进制帧 = 中继数据，直接转发给目标 peer
-    if (isBinary) {
-      // 前 8 字节是目标 peerId 的 UTF-8 长度前缀（Uint32），其余是 payload
-      try {
-        const len = new DataView(raw.buffer, raw.byteOffset, 4).getUint32(0);
-        const targetId = new TextDecoder().decode(raw.subarray(4, 4 + len));
-        const payload = raw.subarray(4 + len);
-        const target = peers.get(targetId);
-        if (target && target.ws.readyState === ws.OPEN) {
-          target.ws.send(raw); // 原样转发（含目标前缀，接收端会解析）
-        }
-      } catch (e) {}
-      return;
-    }
-
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
@@ -94,6 +79,14 @@ wss.on('connection', (ws) => {
         const target = peers.get(msg.target);
         if (target && target.ws.readyState === ws.OPEN) {
           send(target.ws, { type: 'relay-ready', from: myId });
+        }
+        break;
+      }
+      case 'relay-data': {
+        // 中继数据转发（base64 文本，避免二进制帧兼容性问题）
+        const target = peers.get(msg.target);
+        if (target && target.ws.readyState === ws.OPEN) {
+          send(target.ws, { type: 'relay-data', from: myId, data: msg.data });
         }
         break;
       }
