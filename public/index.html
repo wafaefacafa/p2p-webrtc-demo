@@ -347,7 +347,8 @@
           const len = new DataView(raw.buffer, 0, 4).getUint32(0);
           // const senderId = new TextDecoder().decode(raw.subarray(4, 4 + len));
           const payload = raw.subarray(4 + len);
-          onDcMessage(payload.buffer);
+          // slice 出纯 payload 的 ArrayBuffer，不能直接传 payload.buffer（含前缀）
+          onDcMessage(payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength));
         } catch (err) {}
         return;
       }
