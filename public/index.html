@@ -340,18 +340,6 @@
       log(b('信令') + ' 服务器已连接');
     };
     ws.onmessage = (e) => {
-      // 二进制帧 = 中继数据，解析后交给 onDcMessage
-      if (e.data instanceof ArrayBuffer) {
-        const raw = new Uint8Array(e.data);
-        try {
-          const len = new DataView(raw.buffer, 0, 4).getUint32(0);
-          // const senderId = new TextDecoder().decode(raw.subarray(4, 4 + len));
-          const payload = raw.subarray(4 + len);
-          // slice 出纯 payload 的 ArrayBuffer，不能直接传 payload.buffer（含前缀）
-          onDcMessage(payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength));
-        } catch (err) {}
-        return;
-      }
       let m; try { m = JSON.parse(e.data); } catch { return; }
       handleSig(m);
     };
@@ -393,6 +381,13 @@
         // 对端确认中继就绪
         log(b('中继') + ' 对端已就绪');
         onRelayReady();
+        break;
+      case 'relay-data':
+        // 中继数据：base64 解码后交给 onDcMessage
+        try {
+          const bin = Uint8Array.from(atob(m.data), c => c.charCodeAt(0));
+          onDcMessage(bin.buffer);
+        } catch (err) {}
         break;
       case 'error':
         log(b('错误') + ' ' + m.message, 'err');
@@ -565,15 +560,15 @@
     log(b('中继') + ' 中继通道已建立', 'ok');
   }
 
-  // 中继发送：[4字节peerId长度][peerId][payload]
+  // 中继发送：base64 编码后通过 JSON 文本消息发送（避免二进制帧兼容性问题）
   function relaySend(buf) {
     if (!ws || ws.readyState !== 1 || !remotePeer) return;
-    const idEnc = new TextEncoder().encode(remotePeer);
-    const frame = new Uint8Array(4 + idEnc.length + buf.length);
-    new DataView(frame.buffer, 0, 4).setUint32(0, idEnc.length);
-    frame.set(idEnc, 4);
-    frame.set(buf, 4 + idEnc.length);
-    ws.send(frame);
+    const u8 = new Uint8Array(buf);
+    // Uint8Array → base64
+    let binary = '';
+    for (let i = 0; i < u8.length; i++) binary += String.fromCharCode(u8[i]);
+    const b64 = btoa(binary);
+    sendSig({ type: 'relay-data', target: remotePeer, data: b64 });
   }
 
   // 统一发送抽象：relay 模式走 WebSocket，否则走 DataChannel
