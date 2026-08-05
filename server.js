@@ -1,7 +1,7 @@
 /**
  * 轻量信令服务器
- * 职责：维护在线 peer 目录 + 转发 offer/answer/ice
- * 不传输任何文件数据，文件走 WebRTC DataChannel 直连
+ * 职责：维护在线 peer 目录 + 转发 offer/answer/ice + 中继回退（对称型 NAT 兜底）
+ * P2P 直连优先；打洞失败时通过 relay 消息经服务器转发数据
  */
 const http = require('http');
 const fs = require('fs');
@@ -42,7 +42,22 @@ const peers = new Map();
 wss.on('connection', (ws) => {
   let myId = null;
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
+    // 二进制帧 = 中继数据，直接转发给目标 peer
+    if (isBinary) {
+      // 前 8 字节是目标 peerId 的 UTF-8 长度前缀（Uint32），其余是 payload
+      try {
+        const len = new DataView(raw.buffer, raw.byteOffset, 4).getUint32(0);
+        const targetId = new TextDecoder().decode(raw.subarray(4, 4 + len));
+        const payload = raw.subarray(4 + len);
+        const target = peers.get(targetId);
+        if (target && target.ws.readyState === ws.OPEN) {
+          target.ws.send(raw); // 原样转发（含目标前缀，接收端会解析）
+        }
+      } catch (e) {}
+      return;
+    }
+
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
@@ -63,6 +78,14 @@ wss.on('connection', (ws) => {
           send(target.ws, { ...msg, from: myId });
         } else {
           send(ws, { type: 'error', message: `目标 peer ${msg.target} 不在线` });
+        }
+        break;
+      }
+      case 'relay-prepare': {
+        // 通知被叫方建立中继会话
+        const target = peers.get(msg.target);
+        if (target && target.ws.readyState === ws.OPEN) {
+          send(target.ws, { type: 'relay-prepare', from: myId });
         }
         break;
       }
@@ -99,7 +122,7 @@ function log(s) {
 // Render 要求监听 0.0.0.0（Node 默认即如此，显式声明更稳妥）
 server.listen(PORT, '0.0.0.0', () => {
   console.log('────────────────────────────────────────');
-  console.log('  P2P 信令服务器已启动');
+  console.log('  P2P 信令服务器已启动（含中继回退）');
   console.log(`  本机访问:  http://localhost:${PORT}`);
   console.log(`  局域网访问: http://<本机IP>:${PORT}`);
   console.log('  打开两个标签页/设备即可互连测试');

@@ -272,6 +272,8 @@
   let dc = null;        // 主 DataChannel（由呼叫方创建）
   let remotePeer = null;
   let peers = [];
+  let relayMode = false; // 中继回退模式（NAT 打洞失败时启用）
+  let relayReady = false; // 对端中继就绪
 
   // 接收中的文件: id -> {name,size,total,received,chunks,dir,el,bar}
   const incoming = new Map();
@@ -336,6 +338,17 @@
       log(b('信令') + ' 服务器已连接');
     };
     ws.onmessage = (e) => {
+      // 二进制帧 = 中继数据，解析后交给 onDcMessage
+      if (e.data instanceof ArrayBuffer) {
+        const raw = new Uint8Array(e.data);
+        try {
+          const len = new DataView(raw.buffer, 0, 4).getUint32(0);
+          // const senderId = new TextDecoder().decode(raw.subarray(4, 4 + len));
+          const payload = raw.subarray(4 + len);
+          onDcMessage(payload.buffer);
+        } catch (err) {}
+        return;
+      }
       let m; try { m = JSON.parse(e.data); } catch { return; }
       handleSig(m);
     };
@@ -362,6 +375,17 @@
         break;
       case 'ice':
         onRemoteIce(m);
+        break;
+      case 'relay-prepare':
+        // 对端请求中继，自己也进入中继模式
+        if (!relayMode) {
+          relayMode = true;
+          log(b('中继') + ' 对端请求中继回退');
+          tryRelayConnect();
+        } else {
+          // 双方都已就绪
+          tryRelayConnect();
+        }
         break;
       case 'error':
         log(b('错误') + ' ' + m.message, 'err');
@@ -392,7 +416,12 @@
     pc = new RTCPeerConnection(ICE_SERVERS);
     pc.oniceconnectionstatechange = () => {
       log(b('ICE') + ' ' + pc.iceConnectionState);
-      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') setDc('off');
+      if (pc.iceConnectionState === 'failed') {
+        log(b('ICE') + ' 打洞失败，尝试中继回退…', 'err');
+        enterRelay();
+      } else if (pc.iceConnectionState === 'disconnected') {
+        if (!relayMode) setDc('off');
+      }
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') startStatsProbe();
     };
     pc.onicecandidate = (e) => {
@@ -436,6 +465,8 @@
     if (!ws || ws.readyState !== 1) { log(b('提示') + ' 信令未连接', 'err'); return; }
     if (dc && dc.readyState === 'open') return;
     remotePeer = target;
+    relayMode = false;
+    relayReady = false;
     setDc('conn');
     log(b('呼叫') + ' ' + target + ' …');
     newPc();
@@ -470,6 +501,55 @@
     pc.addIceCandidate(new RTCIceCandidate(m.candidate)).catch(() => {});
   }
 
+  // ---------- 中继回退模式 ----------
+  // ICE 失败后自动切换：数据通过 WebSocket 经服务器转发
+  function enterRelay() {
+    if (relayMode) return;
+    relayMode = true;
+    relayReady = false;
+    // 通知对端进入中继
+    sendSig({ type: 'relay-prepare', target: remotePeer });
+    log(b('中继') + ' NAT 打洞失败，切换到服务器中继模式', 'err');
+    // 尝试建立中继通道（被叫方收到 relay-prepare 后也会 enterRelay）
+    tryRelayConnect();
+  }
+
+  function tryRelayConnect() {
+    // 双方都进入 relay 模式后即可通信
+    if (relayMode) {
+      relayReady = true;
+      setDc('on');
+      connType.className = 'conn-type relay';
+      connType.textContent = 'relay 服务器中继';
+      addMsg('已切换到服务器中继模式', 'sys');
+    }
+  }
+
+  // 中继发送：[4字节peerId长度][peerId][payload]
+  function relaySend(buf) {
+    if (!ws || ws.readyState !== 1 || !remotePeer) return;
+    const idEnc = new TextEncoder().encode(remotePeer);
+    const frame = new Uint8Array(4 + idEnc.length + buf.length);
+    new DataView(frame.buffer, 0, 4).setUint32(0, idEnc.length);
+    frame.set(idEnc, 4);
+    frame.set(buf, 4 + idEnc.length);
+    ws.send(frame);
+  }
+
+  // 统一发送抽象：relay 模式走 WebSocket，否则走 DataChannel
+  function channelSend(buf) {
+    if (relayMode && relayReady) {
+      relaySend(buf);
+    } else if (dc && dc.readyState === 'open') {
+      dc.send(buf);
+    }
+  }
+
+  // 判断当前数据通道是否可发送
+  function channelOpen() {
+    return (relayMode && relayReady) || (dc && dc.readyState === 'open');
+  }
+
   function setupDc(channel) {
     dc = channel;
     dc.binaryType = 'arraybuffer';
@@ -487,6 +567,8 @@
   function hangup() {
     if (dc) { try { dc.close(); } catch (e) {} dc = null; }
     if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+    relayMode = false;
+    relayReady = false;
     setDc('idle');
     log(b('挂断'));
   }
@@ -513,11 +595,11 @@
 
   function sendText() {
     const t = msgInput.value.trim();
-    if (!t || !dc || dc.readyState !== 'open') return;
+    if (!t || !channelOpen()) return;
     const enc = new TextEncoder().encode(t);
     const buf = new Uint8Array(enc.length + 1);
     buf[0] = 1; buf.set(enc, 1);
-    dc.send(buf);
+    channelSend(buf);
     addMsg(t, 'out');
     msgInput.value = '';
   }
@@ -571,7 +653,7 @@
   }
 
   async function sendFile(file) {
-    if (!dc || dc.readyState !== 'open') { log(b('提示') + ' 数据通道未连接', 'err'); return; }
+    if (!channelOpen()) { log(b('提示') + ' 数据通道未连接', 'err'); return; }
     const id = 'f-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
     const total = Math.ceil(file.size / CHUNK);
     const item = addTransferItem(file.name, file.size, 'up');
@@ -581,7 +663,7 @@
     const meta = JSON.stringify({ id, name: file.name, size: file.size, total });
     const metaBuf = new Uint8Array(new TextEncoder().encode(meta).length + 1);
     metaBuf[0] = 2; metaBuf.set(new TextEncoder().encode(meta), 1);
-    dc.send(metaBuf);
+    channelSend(metaBuf);
     log(b('发送') + ' ' + file.name + ' (' + fmtSize(file.size) + ', ' + total + ' 片)');
 
     // 2. 分片发送 + 流控
@@ -589,12 +671,15 @@
     const u8 = new Uint8Array(ab);
     let sent = 0;
     for (let i = 0; i < total; i++) {
-      // 流控：缓冲超阈值则等待
-      while (dc.bufferedAmount > 4 * 1024 * 1024) {
+      // 流控：DataChannel 模式下缓冲超阈值则等待；中继模式下用小延迟
+      if (!relayMode && dc && dc.bufferedAmount > 4 * 1024 * 1024) {
         await new Promise(res => {
           const h = () => { dc.removeEventListener('bufferedamountlow', h); res(); };
           dc.addEventListener('bufferedamountlow', h);
         });
+      } else if (relayMode) {
+        // WebSocket 中继模式：避免压爆服务器，每片间留小间隔
+        if (sent % 50 === 0) await new Promise(r => setTimeout(r, 10));
       }
       const start = i * CHUNK;
       const slice = u8.subarray(start, Math.min(start + CHUNK, file.size));
@@ -602,7 +687,7 @@
       buf[0] = 3;
       new DataView(buf.buffer, 1, 4).setUint32(0, i);
       buf.set(slice, 5);
-      dc.send(buf);
+      channelSend(buf);
       sent++;
       const pct = (sent / total) * 100;
       bar.style.width = pct + '%';
@@ -614,7 +699,7 @@
     const end = JSON.stringify({ id });
     const endBuf = new Uint8Array(new TextEncoder().encode(end).length + 1);
     endBuf[0] = 4; endBuf.set(new TextEncoder().encode(end), 1);
-    dc.send(endBuf);
+    channelSend(endBuf);
     item.classList.add('done');
     item.querySelector('.tx-meta').textContent = '已发送 · ' + fmtSize(file.size);
     log(b('完成') + ' ' + file.name + ' 发送完毕', 'ok');
