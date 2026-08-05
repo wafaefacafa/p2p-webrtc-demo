@@ -412,18 +412,32 @@
 
   // ---------- WebRTC ----------
   let statsTimer = null;
+  let iceTimeout = null; // ICE 超时计时器
   function newPc() {
     pc = new RTCPeerConnection(ICE_SERVERS);
     pc.oniceconnectionstatechange = () => {
       log(b('ICE') + ' ' + pc.iceConnectionState);
-      if (pc.iceConnectionState === 'failed') {
-        log(b('ICE') + ' 打洞失败，尝试中继回退…', 'err');
-        enterRelay();
-      } else if (pc.iceConnectionState === 'disconnected') {
-        if (!relayMode) setDc('off');
+      const st = pc.iceConnectionState;
+      if (st === 'failed' || st === 'disconnected') {
+        // 打洞失败或断开，只要还没进中继模式就回退
+        if (!relayMode) {
+          log(b('ICE') + ' 直连失败，切换中继回退…', 'err');
+          enterRelay();
+        }
       }
-      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') startStatsProbe();
+      if (st === 'connected' || st === 'completed') {
+        if (iceTimeout) { clearTimeout(iceTimeout); iceTimeout = null; }
+        startStatsProbe();
+      }
     };
+    // 超时兜底：ICE checking 超过 8 秒还没连上，直接切中继
+    if (iceTimeout) clearTimeout(iceTimeout);
+    iceTimeout = setTimeout(() => {
+      if (!relayMode && pc && pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') {
+        log(b('ICE') + ' 超时 8s 未连上，切换中继回退…', 'err');
+        enterRelay();
+      }
+    }, 8000);
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         // 解析 candidate 类型，让用户看到打洞过程
@@ -565,6 +579,7 @@
   }
 
   function hangup() {
+    if (iceTimeout) { clearTimeout(iceTimeout); iceTimeout = null; }
     if (dc) { try { dc.close(); } catch (e) {} dc = null; }
     if (pc) { try { pc.close(); } catch (e) {} pc = null; }
     relayMode = false;
