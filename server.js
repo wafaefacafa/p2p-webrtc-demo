@@ -89,6 +89,14 @@ wss.on('connection', (ws) => {
         }
         break;
       }
+      case 'relay-ready': {
+        // 中继就绪确认，转发给对端
+        const target = peers.get(msg.target);
+        if (target && target.ws.readyState === ws.OPEN) {
+          send(target.ws, { type: 'relay-ready', from: myId });
+        }
+        break;
+      }
       default:
         send(ws, { type: 'error', message: `未知消息类型: ${msg.type}` });
     }

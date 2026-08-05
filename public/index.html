@@ -274,6 +274,8 @@
   let peers = [];
   let relayMode = false; // 中继回退模式（NAT 打洞失败时启用）
   let relayReady = false; // 对端中继就绪
+  let relayRetry = null; // relay-prepare 重试计时器
+  let relayRetryCount = 0;
 
   // 接收中的文件: id -> {name,size,total,received,chunks,dir,el,bar}
   const incoming = new Map();
@@ -381,11 +383,15 @@
         if (!relayMode) {
           relayMode = true;
           log(b('中继') + ' 对端请求中继回退');
-          tryRelayConnect();
-        } else {
-          // 双方都已就绪
-          tryRelayConnect();
         }
+        // 回复就绪确认，让对端知道我已进入中继
+        sendSig({ type: 'relay-ready', target: m.from });
+        onRelayReady();
+        break;
+      case 'relay-ready':
+        // 对端确认中继就绪
+        log(b('中继') + ' 对端已就绪');
+        onRelayReady();
         break;
       case 'error':
         log(b('错误') + ' ' + m.message, 'err');
@@ -521,22 +527,41 @@
     if (relayMode) return;
     relayMode = true;
     relayReady = false;
+    log(b('中继') + ' NAT 打洞失败，切换到服务器中继模式', 'err');
     // 通知对端进入中继
     sendSig({ type: 'relay-prepare', target: remotePeer });
-    log(b('中继') + ' NAT 打洞失败，切换到服务器中继模式', 'err');
-    // 尝试建立中继通道（被叫方收到 relay-prepare 后也会 enterRelay）
-    tryRelayConnect();
+    // 启动重试，等对端 relay-ready 确认后才真正 ready
+    relayRetryCount = 0;
+    scheduleRelayRetry();
   }
 
-  function tryRelayConnect() {
-    // 双方都进入 relay 模式后即可通信
-    if (relayMode) {
-      relayReady = true;
-      setDc('on');
-      connType.className = 'conn-type relay';
-      connType.textContent = 'relay 服务器中继';
-      addMsg('已切换到服务器中继模式', 'sys');
-    }
+  function scheduleRelayRetry() {
+    if (relayReady || !relayMode) return;
+    if (relayRetry) clearTimeout(relayRetry);
+    relayRetry = setTimeout(() => {
+      if (!relayReady && relayMode) {
+        relayRetryCount++;
+        if (relayRetryCount <= 3) {
+          log(b('中继') + ' 等待对端确认…重试 (' + relayRetryCount + '/3)');
+          sendSig({ type: 'relay-prepare', target: remotePeer });
+          scheduleRelayRetry();
+        } else {
+          log(b('中继') + ' 对端无响应，中继失败', 'err');
+        }
+      }
+    }, 3000);
+  }
+
+  // 双方都确认进入中继模式后调用
+  function onRelayReady() {
+    if (relayReady) return; // 已就绪则跳过
+    relayReady = true;
+    if (relayRetry) { clearTimeout(relayRetry); relayRetry = null; }
+    setDc('on');
+    connType.className = 'conn-type relay';
+    connType.textContent = 'relay 服务器中继';
+    addMsg('已切换到服务器中继模式', 'sys');
+    log(b('中继') + ' 中继通道已建立', 'ok');
   }
 
   // 中继发送：[4字节peerId长度][peerId][payload]
@@ -580,6 +605,7 @@
 
   function hangup() {
     if (iceTimeout) { clearTimeout(iceTimeout); iceTimeout = null; }
+    if (relayRetry) { clearTimeout(relayRetry); relayRetry = null; }
     if (dc) { try { dc.close(); } catch (e) {} dc = null; }
     if (pc) { try { pc.close(); } catch (e) {} pc = null; }
     relayMode = false;
