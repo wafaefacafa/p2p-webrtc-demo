@@ -146,6 +146,7 @@
   .conn-type.host { color: var(--accent); background: rgba(0,113,227,.1); }
   .conn-type.srflx { color: var(--green); background: rgba(52,199,89,.12); }
   .conn-type.relay { color: var(--amber); background: rgba(255,159,10,.14); }
+  .conn-type.secure { color: var(--green); background: rgba(52,199,89,.12); }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 999px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -174,6 +175,9 @@
           <input type="text" id="remoteId" placeholder="输入对端 ID" autocomplete="off">
         </div>
         <div class="row">
+          <input type="text" id="secretKey" placeholder="共享密钥（可选）" autocomplete="off">
+        </div>
+        <div class="row">
           <button class="btn primary" id="callBtn" style="flex:1">呼叫</button>
           <button class="btn danger" id="hangBtn" disabled>挂断</button>
         </div>
@@ -184,6 +188,10 @@
         <div class="dc-state">
           <span style="font-size:13px;color:var(--muted)">连接类型</span>
           <span class="conn-type" id="connType">—</span>
+        </div>
+        <div class="dc-state">
+          <span style="font-size:13px;color:var(--muted)">加密状态</span>
+          <span class="conn-type" id="encStatus">未启用</span>
         </div>
         <p class="hint">host=同网直连 · srflx=STUN打洞(跨网) · relay=TURN中继。打洞失败需部署自建 coturn 做兜底。</p>
       </div>
@@ -235,8 +243,8 @@
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
   const sigDot = $('sigDot'), sigBadge = $('sigBadge'), myIdEl = $('myId'), idChip = $('idChip');
-  const remoteId = $('remoteId'), callBtn = $('callBtn'), hangBtn = $('hangBtn');
-  const dcBadge = $('dcBadge'), connType = $('connType'), peerListEl = $('peerList'), peerCount = $('peerCount');
+  const remoteId = $('remoteId'), secretKeyInput = $('secretKey'), callBtn = $('callBtn'), hangBtn = $('hangBtn');
+  const dcBadge = $('dcBadge'), connType = $('connType'), encStatus = $('encStatus'), peerListEl = $('peerList'), peerCount = $('peerCount');
   const msgsEl = $('msgs'), msgInput = $('msgInput'), sendBtn = $('sendBtn');
   const dropEl = $('drop'), fileInput = $('fileInput'), transfersEl = $('transfers');
   const logEl = $('log');
@@ -266,6 +274,10 @@
   }
   const ICE_SERVERS = buildIceServers();
   const CHUNK = 64 * 1024; // 64KB
+  const ENCRYPTION_HEADER = new TextEncoder().encode('P2PENC');
+  const PBKDF2_SALT = new TextEncoder().encode('p2p-demo-encryption-salt');
+  const PBKDF2_ITER = 250000;
+  let cryptoKey = null;
   const myId = 'p-' + Math.random().toString(36).slice(2, 8);
   let ws = null;
   let pc = null;        // RTCPeerConnection
@@ -322,7 +334,77 @@
     }
   }
 
-  function addMsg(text, dir) {
+  function setEncryptionStatus(enabled) {
+    encStatus.className = 'conn-type' + (enabled ? ' secure' : '');
+    encStatus.textContent = enabled ? '已启用' : '未启用';
+  }
+
+  async function deriveCryptoKey(passphrase) {
+    const base = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(passphrase), { name: 'PBKDF2' }, false, ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: PBKDF2_SALT, iterations: PBKDF2_ITER, hash: 'SHA-256' },
+      base,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  async function updateCryptoKey() {
+    const passphrase = secretKeyInput.value.trim();
+    if (!passphrase) {
+      cryptoKey = null;
+      setEncryptionStatus(false);
+      return;
+    }
+    try {
+      cryptoKey = await deriveCryptoKey(passphrase);
+      setEncryptionStatus(true);
+      log(b('加密') + ' 共享密钥已设置');
+    } catch (err) {
+      log(b('加密') + ' 密钥生成失败：' + err.message, 'err');
+      cryptoKey = null;
+      setEncryptionStatus(false);
+    }
+  }
+
+  async function encryptPacket(buf) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, buf);
+    const out = new Uint8Array(ENCRYPTION_HEADER.length + iv.byteLength + ct.byteLength);
+    out.set(ENCRYPTION_HEADER, 0);
+    out.set(iv, ENCRYPTION_HEADER.length);
+    out.set(new Uint8Array(ct), ENCRYPTION_HEADER.length + iv.byteLength);
+    return out;
+  }
+
+  async function decryptPacket(data) {
+    const iv = data.subarray(ENCRYPTION_HEADER.length, ENCRYPTION_HEADER.length + 12);
+    const ct = data.subarray(ENCRYPTION_HEADER.length + 12);
+    return await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, ct);
+  }
+
+  async function maybeDecryptPacket(buf) {
+    const data = new Uint8Array(buf);
+    if (data.length >= ENCRYPTION_HEADER.length && ENCRYPTION_HEADER.every((v, i) => data[i] === v)) {
+      if (!cryptoKey) {
+        log(b('加密') + ' 收到加密数据但未设置密钥', 'err');
+        return null;
+      }
+      try {
+        const plain = await decryptPacket(data);
+        return plain;
+      } catch (err) {
+        log(b('加密') + ' 解密失败：' + err.message, 'err');
+        return null;
+      }
+    }
+    return buf;
+  }
+
+  async function addMsg(text, dir) {
     const m = document.createElement('div');
     m.className = 'msg ' + dir;
     m.textContent = text;
@@ -572,11 +654,15 @@
   }
 
   // 统一发送抽象：relay 模式走 WebSocket，否则走 DataChannel
-  function channelSend(buf) {
+  async function channelSend(buf) {
+    let payload = buf;
+    if (cryptoKey) {
+      payload = await encryptPacket(buf);
+    }
     if (relayMode && relayReady) {
-      relaySend(buf);
+      relaySend(payload);
     } else if (dc && dc.readyState === 'open') {
-      dc.send(buf);
+      dc.send(payload);
     }
   }
 
@@ -612,8 +698,10 @@
 
   // ---------- DataChannel 协议 ----------
   // 前缀字节：1=text, 2=file-meta, 3=file-chunk(4字节序号+数据), 4=file-end
-  function onDcMessage(buf) {
-    const data = new Uint8Array(buf);
+  async function onDcMessage(buf) {
+    const decrypted = await maybeDecryptPacket(buf);
+    if (decrypted === null) return;
+    const data = new Uint8Array(decrypted);
     const kind = data[0];
     if (kind === 1) {
       addMsg(new TextDecoder().decode(data.subarray(1)), 'in');
@@ -621,7 +709,7 @@
       const meta = JSON.parse(new TextDecoder().decode(data.subarray(1)));
       startIncoming(meta);
     } else if (kind === 3) {
-      const idx = new DataView(buf, 1, 4).getUint32(0);
+      const idx = new DataView(decrypted, 1, 4).getUint32(0);
       const chunk = data.subarray(5);
       recvChunk(idx, chunk);
     } else if (kind === 4) {
@@ -630,13 +718,13 @@
     }
   }
 
-  function sendText() {
+  async function sendText() {
     const t = msgInput.value.trim();
     if (!t || !channelOpen()) return;
     const enc = new TextEncoder().encode(t);
     const buf = new Uint8Array(enc.length + 1);
     buf[0] = 1; buf.set(enc, 1);
-    channelSend(buf);
+    await channelSend(buf);
     addMsg(t, 'out');
     msgInput.value = '';
   }
@@ -700,7 +788,7 @@
     const meta = JSON.stringify({ id, name: file.name, size: file.size, total });
     const metaBuf = new Uint8Array(new TextEncoder().encode(meta).length + 1);
     metaBuf[0] = 2; metaBuf.set(new TextEncoder().encode(meta), 1);
-    channelSend(metaBuf);
+    await channelSend(metaBuf);
     log(b('发送') + ' ' + file.name + ' (' + fmtSize(file.size) + ', ' + total + ' 片)');
 
     // 2. 分片发送 + 流控
@@ -724,7 +812,7 @@
       buf[0] = 3;
       new DataView(buf.buffer, 1, 4).setUint32(0, i);
       buf.set(slice, 5);
-      channelSend(buf);
+      await channelSend(buf);
       sent++;
       const pct = (sent / total) * 100;
       bar.style.width = pct + '%';
@@ -736,7 +824,7 @@
     const end = JSON.stringify({ id });
     const endBuf = new Uint8Array(new TextEncoder().encode(end).length + 1);
     endBuf[0] = 4; endBuf.set(new TextEncoder().encode(end), 1);
-    channelSend(endBuf);
+    await channelSend(endBuf);
     item.classList.add('done');
     item.querySelector('.tx-meta').textContent = '已发送 · ' + fmtSize(file.size);
     log(b('完成') + ' ' + file.name + ' 发送完毕', 'ok');
@@ -752,6 +840,7 @@
   callBtn.onclick = call;
   hangBtn.onclick = hangup;
   sendBtn.onclick = sendText;
+  secretKeyInput.oninput = updateCryptoKey;
   msgInput.onkeydown = (e) => { if (e.key === 'Enter') sendText(); };
   fileInput.onchange = () => { if (fileInput.files[0]) sendFile(fileInput.files[0]); fileInput.value = ''; };
   dropEl.onclick = () => fileInput.click();
